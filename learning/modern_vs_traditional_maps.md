@@ -103,6 +103,7 @@ graph TD
         
     *   **双重哈希 (Double Hashing)**: 使用第二个独立的哈希函数来计算探测步长。可以更好地打散元素，但计算开销稍大。
         
+![Boost.Unordered Flat Map Data Structure](https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEi2oLcYKndxyhp0OW5b3xdoptzjKHjyLp_udDkmFb94SZzgpWPJqEUrad-unp_PNsrfKEkRQGapNWd3qxxzF8_s1bAEr4Rx4vKC2o9e-RxyBHwCeM7YIUALAHxMuOqr72kXWs-79J2lzc27B2op7-hawdTOrTfOoOB_c-TjEidw2pUvs3Es7btmNS29/s935/data_structure.png)
 
 `boost::unordered_flat_map` 属于**非重定位 (Non-relocating)** 的开放寻址，插入新元素不会移动已存在元素的位置（除非发生 Rehashing）。
 
@@ -147,9 +148,54 @@ graph TD
 *   **缓存友好**: 元数据数组小且紧凑，更容易完全加载到缓存中。
     
 *   **溢出控制**: 每组的第16个字节用作溢出标志，帮助加速探测过程。
-    
 
-![Boost.Unordered Flat Map Data Structure](https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEi2oLcYKndxyhp0OW5b3xdoptzjKHjyLp_udDkmFb94SZzgpWPJqEUrad-unp_PNsrfKEkRQGapNWd3qxxzF8_s1bAEr4Rx4vKC2o9e-RxyBHwCeM7YIUALAHxMuOqr72kXWs-79J2lzc27B2op7-hawdTOrTfOoOB_c-TjEidw2pUvs3Es7btmNS29/s935/data_structure.png)
+``` mermaid
+graph TD
+    subgraph boost_unordered_flat_map
+        direction LR
+
+        subgraph MetadataArray ["元数据数组 (Control Bytes)"]
+            direction TB
+            M0(Ctrl 0)
+            M1(Ctrl 1)
+            M...(...)
+            M14(Ctrl 14)
+            M15(Ctrl 15<br/>溢出/哨兵)
+        end
+
+        subgraph MainArray ["主存储数组 (Slots)"]
+            direction TB
+            S0(Slot 0<br/>Elem) --- M0
+            S1(Slot 1<br/>Elem) --- M1
+            S...(...) --- M...
+            S14(Slot 14<br/>Elem) --- M14
+            S15[(空位)] --- M15
+        end
+
+        MetadataArray -.-> MainArray;
+
+        subgraph GroupConcept ["逻辑分组 (Group)"]
+            direction TB
+            G_Meta("16 控制字节") --- MetadataArray
+            G_Slots("15 元素槽位") --- MainArray
+        end
+
+        HashKey[("Key -> Hash(Key)")]
+
+        subgraph SIMDProcess ["SIMD 加速查找 (在一个 Group 内)"]
+            direction TB
+            HashKey --> CalcH2{"计算 h2 (Reduced Hash)"}
+            CalcH2 --> SIMDComp{"SIMD: h2 与 Group 内<br/>16个 Ctrl Bytes 并行比较"}
+            SIMDComp --> Bitmask{"生成 16-bit 位掩码<br/>(匹配结果)"}
+            Bitmask --> CheckMask{"检查掩码中<br/>为 1 的位"}
+            CheckMask --> AccessSlot{"仅访问匹配槽位<br/>进行完整 Key 比较"}
+        end
+
+        style MetadataArray fill:#f9f,stroke:#333,stroke-width:2px
+        style MainArray fill:#ccf,stroke:#333,stroke-width:2px
+        style GroupConcept fill:#eee,stroke:#333,stroke-width:1px,stroke-dasharray: 5 5
+    end
+```
 
 ### 2.3 删除与墓碑 (Tombstones)
 
@@ -287,6 +333,68 @@ graph TD
     
 
 这种两级锁设计极大地降低了高并发场景下的锁争用，是其高性能的关键之一。
+
+```mermaid
+graph TD
+    subgraph boost_concurrent_flat_map ["concurrent_flat_map 结构"]
+        direction TB
+
+        subgraph ContainerLevelLocks ["容器级锁 (分散读写自旋锁)"]
+            direction LR
+            CL0(Lock 0<br/>Cache Line)
+            CL1(Lock 1<br/>Cache Line)
+            CL...(...)
+            CLN(Lock N<br/>Cache Line)
+        end
+
+        subgraph Threads ["线程"]
+            direction TB
+            T1(Thread 1) -->|分配| CL0
+            T2(Thread 2) -->|分配| CL1
+            T3(Thread 3) -->|分配| CL...
+            TN(Thread N) -->|分配| CL0
+        end
+
+
+        subgraph UnderlyingFlatMap ["底层 Flat Map 结构 (分组)"]
+            direction LR
+
+            subgraph Group0 ["Group 0"]
+                direction TB
+                GL0(组级锁 0<br/>rw_spinlock)
+                AC0(原子计数器 0)
+                MetaData0[...]
+                Slots0[...]
+            end
+
+            subgraph Group1 ["Group 1"]
+                direction TB
+                GL1(组级锁 1<br/>rw_spinlock)
+                AC1(原子计数器 1)
+                MetaData1[...]
+                Slots1[...]
+            end
+
+            GroupEtc[...]
+
+        end
+
+        ContainerLevelLocks -- "保护全局操作 (如 Rehash)" --> UnderlyingFlatMap
+        Threads -- "访问需要获取对应锁" --> ContainerLevelLocks
+
+        T1 -- "操作 Group 0" --> GL0
+        T2 -- "操作 Group 1" --> GL1
+        T3 -- "操作 Group 0" --> GL0
+        T1 -- "乐观插入 Group 0" --> AC0
+
+        style ContainerLevelLocks fill:#f9f,stroke:#333,stroke-width:2px
+        style UnderlyingFlatMap fill:#ccf,stroke:#333,stroke-width:1px
+        style Group0 fill:#eef,stroke:#333,stroke-width:1px
+        style Group1 fill:#eef,stroke:#333,stroke-width:1px
+        style Threads fill:#cfc,stroke:#333,stroke-width:1px
+
+    end
+```
 
 ### 3.3 核心并发算法
 
