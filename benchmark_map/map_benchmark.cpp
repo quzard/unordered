@@ -329,7 +329,7 @@ private:
         std::vector<std::thread> threads;
         std::atomic<size_t> found_count{0};
         std::atomic<size_t> insert_count{0};
-        std::vector<size_t> thread_checksums(num_threads, 0);
+        std::atomic<size_t> checksum{0};
 
         auto worker = [&](size_t id)
         {
@@ -337,20 +337,12 @@ private:
             size_t local_found = 0;
             size_t local_insert = 0;
             size_t local_checksum = 0;
-            std::mt19937 local_rng(42 + id); // 使用固定种子
-            std::uniform_int_distribution<int> op_dist(0, 9);
-
-            // 预先生成操作序列，确保每次运行相同
-            std::vector<int> operations;
-            operations.reserve(num_operations / num_threads);
+            std::mt19937 local_rng(42 + id);
+            std::uniform_int_distribution<int> op_dist(0, 9); // 70% 查找, 20% 插入, 10% 删除
+            volatile std::string volatile_result;
             for (size_t i = 0; i < num_operations / num_threads; ++i)
             {
-                operations.push_back(op_dist(local_rng));
-            }
-
-            for (size_t i = 0; i < num_operations / num_threads; ++i)
-            {
-                int op = operations[i];
+                int op = op_dist(local_rng);
                 int idx = i % keys.size();
 
                 if (op < 7)
@@ -358,6 +350,8 @@ private:
                     if (map_wrapper.find(lookup_keys[idx], result))
                     {
                         local_found++;
+                        // 使用结果计算校验和，防止编译器优化
+                        const_cast<std::string&>(volatile_result) = result;
                         local_checksum += result.length();
                     }
                 }
@@ -374,7 +368,7 @@ private:
 
             found_count += local_found;
             insert_count += local_insert;
-            thread_checksums[id] = local_checksum;
+            checksum += local_checksum;
         };
 
         for (size_t t = 0; t < num_threads; ++t)
@@ -387,15 +381,8 @@ private:
             thread.join();
         }
 
-        // 按顺序累加校验和
-        size_t total_checksum = 0;
-        for (size_t t = 0; t < num_threads; ++t)
-        {
-            total_checksum += thread_checksums[t];
-        }
-
-        result_checksum += total_checksum;
-        std::cout << "找到: " << found_count << ", 插入: " << insert_count << " (校验和: " << total_checksum << ")"
+        result_checksum += checksum;
+        std::cout << "找到: " << found_count << ", 插入: " << insert_count << " (校验和: " << checksum << ")"
                   << std::endl;
         return timer.elapsed();
     }
